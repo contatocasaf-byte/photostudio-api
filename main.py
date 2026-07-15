@@ -23,15 +23,22 @@ def get_session():
     # onnxruntime/numba/opencv/scikit-image, cuja importação sozinha já leva
     # minutos numa CPU fraca (Render free) — se isso acontecesse no nível do
     # módulo, o Uvicorn não conseguiria nem abrir a porta a tempo do Render
-    # considerar o deploy no ar (já aconteceu: o serviço quase foi matado
-    # por "timeout de porta" bem na hora que finalmente subia). Adiando pra
-    # cá, o servidor abre a porta quase instantaneamente e só paga esse
-    # custo pesado na primeira chamada de verdade — sessão global cacheada
-    # (modelo u2net, ~170MB) e reaproveitada entre requests depois disso.
+    # considerar o deploy no ar. Adiando pra cá, o servidor abre a porta
+    # quase instantaneamente e só paga esse custo pesado na primeira
+    # chamada de verdade — sessão global cacheada e reaproveitada entre
+    # requests depois disso.
+    #
+    # Modelo "u2netp" (~4.7MB) em vez de "u2net" (~176MB): no Render
+    # (512MB de RAM tanto no Free quanto no Starter — só a CPU muda entre
+    # os planos), carregar o modelo grande estourava a memória bem na hora
+    # do carregamento, matando e reiniciando a instância em loop (visto
+    # nos logs: download termina → "Instance restarted", repetido). u2netp
+    # é a versão leve do mesmo modelo — qualidade de segmentação um pouco
+    # inferior, mas evita o OOM sem precisar de plano mais caro.
     global _session
     if _session is None:
         from rembg import new_session
-        _session = new_session("u2net")
+        _session = new_session("u2netp")
     return _session
 
 
