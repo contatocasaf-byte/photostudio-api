@@ -7,7 +7,6 @@ import boto3
 from botocore.config import Config
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
-from rembg import new_session
 
 from rembg_logic import rembg_process
 
@@ -20,12 +19,18 @@ _session = None
 
 
 def get_session():
-    # Carregado uma vez só (modelo u2net, ~170MB) e reaproveitado entre
-    # requests — é por isso que a hospedagem precisa manter o processo vivo
-    # entre chamadas para valer a pena (ver plano: Render free "dorme" após
-    # inatividade, então a 1a chamada depois de um tempo recarrega o modelo).
+    # Import de `rembg` fica dentro da função de propósito: puxa
+    # onnxruntime/numba/opencv/scikit-image, cuja importação sozinha já leva
+    # minutos numa CPU fraca (Render free) — se isso acontecesse no nível do
+    # módulo, o Uvicorn não conseguiria nem abrir a porta a tempo do Render
+    # considerar o deploy no ar (já aconteceu: o serviço quase foi matado
+    # por "timeout de porta" bem na hora que finalmente subia). Adiando pra
+    # cá, o servidor abre a porta quase instantaneamente e só paga esse
+    # custo pesado na primeira chamada de verdade — sessão global cacheada
+    # (modelo u2net, ~170MB) e reaproveitada entre requests depois disso.
     global _session
     if _session is None:
+        from rembg import new_session
         _session = new_session("u2net")
     return _session
 

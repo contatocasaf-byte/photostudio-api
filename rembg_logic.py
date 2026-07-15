@@ -14,7 +14,6 @@ from io import BytesIO
 
 import numpy as np
 from PIL import Image, ImageOps
-from rembg import remove
 from scipy import ndimage
 
 # Conectividade-4 (só vizinhos ortogonais, sem diagonal) — mesma definição
@@ -166,6 +165,8 @@ def rembg_process(data: bytes, session, remove_holes: bool = True) -> Image.Imag
     antes de qualquer outra coisa, então tudo depois (rembg, Passo A/B/C)
     trabalha na orientação correta.
     """
+    from rembg import remove  # import pesado, adiado — ver get_session() em main.py
+
     original = ImageOps.exif_transpose(Image.open(BytesIO(data))).convert("RGBA")
     removed = remove(original, session=session).convert("RGBA")
 
