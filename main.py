@@ -28,18 +28,20 @@ def get_session():
     # chamada de verdade — sessão global cacheada e reaproveitada entre
     # requests depois disso.
     #
-    # Modelo "u2netp" (~4.7MB) em vez de "u2net" (~176MB) já ajuda, mas não
-    # foi suficiente sozinho: o gráfico de memória do Render (confirmado)
-    # mostrava um salto quase vertical até ~100% dos 512MB bem na criação
-    # da sessão, INDEPENDENTE do tamanho do modelo — sintoma clássico do
-    # arena allocator do onnxruntime, que reserva um bloco grande de
-    # memória de antemão por padrão, sem relação com o tamanho real do
-    # modelo. `new_session()` do rembg não expõe essas opções, então
-    # construímos a sessão diretamente com o arena desligado.
+    # O arena allocator do onnxruntime reserva um bloco grande de memória
+    # de antemão por padrão, independente do tamanho do modelo —
+    # `new_session()` do rembg não expõe essas opções, então construímos a
+    # sessão diretamente com o arena desligado.
+    #
+    # Modelo "u2net" (~176MB, melhor qualidade) em vez de "u2netp" (~4.7MB,
+    # usado temporariamente enquanto o plano do Render só tinha 512MB de
+    # RAM). Medido localmente: pico de ~1000MB com u2net — cabe com folga
+    # no plano Standard (2GB). Se a instância voltar a ter pouca RAM no
+    # futuro, trocar de volta pra U2netpSession("u2netp", sess_opts) aqui.
     global _session
     if _session is None:
         import onnxruntime as ort
-        from rembg.sessions.u2netp import U2netpSession
+        from rembg.sessions.u2net import U2netSession
 
         sess_opts = ort.SessionOptions()
         sess_opts.enable_cpu_mem_arena = False
@@ -47,7 +49,7 @@ def get_session():
         sess_opts.intra_op_num_threads = 1
         sess_opts.inter_op_num_threads = 1
 
-        _session = U2netpSession("u2netp", sess_opts)
+        _session = U2netSession("u2net", sess_opts)
     return _session
 
 
