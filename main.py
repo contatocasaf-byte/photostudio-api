@@ -9,6 +9,8 @@ from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
 from rembg_logic import rembg_process
+import pdf_logic
+from pdf_models import GenerateCatalogPdfRequest
 
 app = FastAPI()
 
@@ -105,5 +107,24 @@ def remove_background(
     client.put_object(
         Bucket=BUCKET, Key=result_key, Body=out.getvalue(), ContentType="image/png"
     )
+
+    return {"resultKey": result_key}
+
+
+@app.post("/catalogos/pdf")
+def generate_catalog_pdf(
+    body: GenerateCatalogPdfRequest,
+    x_shared_secret: Optional[str] = Header(default=None),
+):
+    check_secret(x_shared_secret)
+
+    client = get_r2_client()
+    try:
+        pdf_bytes = pdf_logic.build_pdf(body, client, BUCKET)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Falha ao gerar PDF: {e}")
+
+    result_key = f"catalogos/pdf/{uuid.uuid4()}.pdf"
+    client.put_object(Bucket=BUCKET, Key=result_key, Body=pdf_bytes, ContentType="application/pdf")
 
     return {"resultKey": result_key}
