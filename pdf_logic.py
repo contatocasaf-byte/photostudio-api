@@ -337,10 +337,10 @@ def _draw_field_op(
 
 def build_pdf(payload: GenerateCatalogPdfRequest, client, bucket: str) -> bytes:
     """Monta o PDF página a página, respeitando a MESMA ordem de
-    camadas do preview (PreviewPageCanvas.tsx): fundo -> campos de
-    cabeçalho/rodapé -> bordas de card -> formas de card -> campos de
-    card. Cada `page.showPage()` fecha a página atual e abre a
-    seguinte."""
+    camadas do preview (PreviewPageCanvas.tsx): fundo -> formas de
+    página -> campos de cabeçalho/rodapé -> bordas de card -> formas de
+    card -> campos de card. Cada `page.showPage()` fecha a página atual
+    e abre a seguinte."""
     buf = BytesIO()
     page_w_pt = px_to_pt(payload.paginaLargura)
     page_h_pt = px_to_pt(payload.paginaAltura)
@@ -353,6 +353,9 @@ def build_pdf(payload: GenerateCatalogPdfRequest, client, bucket: str) -> bytes:
             img = fetch_image_cached(page.background.key, image_cache, client, bucket)
             fitted = img.resize((max(1, round(page.background.w)), max(1, round(page.background.h))))
             draw_image(c, page.background, payload.paginaAltura, fitted)
+
+        for shape in page.pageShapes:
+            draw_shape(c, shape, payload.paginaAltura)
 
         for op in page.pageFields:
             _draw_field_op(c, op, payload.paginaAltura, image_cache, client, bucket)

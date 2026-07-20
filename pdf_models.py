@@ -68,6 +68,7 @@ class PdfBorderSpec(BaseModel):
 
 class PdfPageSpec(BaseModel):
     background: Optional[PdfImageSpec] = None
+    pageShapes: list[PdfShapeSpec] = []
     pageFields: list[PdfFieldSpec]
     cardBorders: list[PdfBorderSpec]
     cardShapes: list[PdfShapeSpec]
