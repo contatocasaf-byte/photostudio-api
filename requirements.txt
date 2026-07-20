@@ -8,3 +8,5 @@ boto3==1.35.97
 numpy>=1.26,<3
 scipy>=1.13,<2
 reportlab==4.2.5
+pypdf==5.1.0
+pymupdf==1.25.1

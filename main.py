@@ -10,7 +10,8 @@ from pydantic import BaseModel
 
 from rembg_logic import rembg_process
 import pdf_logic
-from pdf_models import GenerateCatalogPdfRequest
+import pdf_render
+from pdf_models import GenerateCatalogPdfRequest, RenderPdfBackgroundRequest
 
 app = FastAPI()
 
@@ -126,5 +127,30 @@ def generate_catalog_pdf(
 
     result_key = f"catalogos/pdf/{uuid.uuid4()}.pdf"
     client.put_object(Bucket=BUCKET, Key=result_key, Body=pdf_bytes, ContentType="application/pdf")
+
+    return {"resultKey": result_key}
+
+
+@app.post("/catalogos/render-pdf-background")
+def render_pdf_background(
+    body: RenderPdfBackgroundRequest,
+    x_shared_secret: Optional[str] = Header(default=None),
+):
+    check_secret(x_shared_secret)
+
+    client = get_r2_client()
+    try:
+        obj = client.get_object(Bucket=BUCKET, Key=body.key)
+        pdf_bytes = obj["Body"].read()
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"Não achei o PDF no R2: {e}")
+
+    try:
+        png_bytes = pdf_render.render_pdf_page_to_png(pdf_bytes, body.width, body.height)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Falha ao converter PDF pra imagem: {e}")
+
+    result_key = f"catalogos/assets/{uuid.uuid4()}.png"
+    client.put_object(Bucket=BUCKET, Key=result_key, Body=png_bytes, ContentType="image/png")
 
     return {"resultKey": result_key}

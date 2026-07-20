@@ -16,12 +16,13 @@ from io import BytesIO
 
 import numpy as np
 from PIL import Image
+from pypdf import PdfReader, PdfWriter
 from reportlab.lib.colors import HexColor
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfgen import canvas
 
-from pdf_models import GenerateCatalogPdfRequest, PdfBorderSpec, PdfImageSpec, PdfShapeSpec, PdfTextSpec
+from pdf_models import GenerateCatalogPdfRequest, PdfBorderSpec, PdfImageSpec, PdfPdfBackgroundSpec, PdfShapeSpec, PdfTextSpec
 
 # --- Coordenadas ------------------------------------------------------
 # Espaço da app: px a 150dpi (mesma convenção de PX_PER_MM em
@@ -340,19 +341,33 @@ def build_pdf(payload: GenerateCatalogPdfRequest, client, bucket: str) -> bytes:
     camadas do preview (PreviewPageCanvas.tsx): fundo -> formas de
     página -> campos de cabeçalho/rodapé -> bordas de card -> formas de
     card -> campos de card. Cada `page.showPage()` fecha a página atual
-    e abre a seguinte."""
+    e abre a seguinte.
+
+    Fundo em PDF (upload de PDF, ver pdf_render.py) é um caso à parte:
+    a página do PDF original NÃO é desenhada aqui (reportlab não sabe
+    desenhar PDF dentro de PDF) — só fica marcada em `pages_with_pdf_bg`
+    e é mesclada como camada vetorial de base num segundo passo, depois
+    de fechado o PDF de conteúdo inteiro (ver _merge_pdf_backgrounds)."""
     buf = BytesIO()
     page_w_pt = px_to_pt(payload.paginaLargura)
     page_h_pt = px_to_pt(payload.paginaAltura)
     c = canvas.Canvas(buf, pagesize=(page_w_pt, page_h_pt))
 
     image_cache: dict[str, Image.Image] = {}
+    pdf_bg_cache: dict[str, bytes] = {}
+    pages_with_pdf_bg: dict[int, str] = {}
 
-    for page in payload.pages:
+    for i, page in enumerate(payload.pages):
         if page.background:
-            img = fetch_image_cached(page.background.key, image_cache, client, bucket)
-            fitted = img.resize((max(1, round(page.background.w)), max(1, round(page.background.h))))
-            draw_image(c, page.background, payload.paginaAltura, fitted)
+            if isinstance(page.background, PdfPdfBackgroundSpec):
+                pages_with_pdf_bg[i] = page.background.key
+                if page.background.key not in pdf_bg_cache:
+                    obj = client.get_object(Bucket=bucket, Key=page.background.key)
+                    pdf_bg_cache[page.background.key] = obj["Body"].read()
+            else:
+                img = fetch_image_cached(page.background.key, image_cache, client, bucket)
+                fitted = img.resize((max(1, round(page.background.w)), max(1, round(page.background.h))))
+                draw_image(c, page.background, payload.paginaAltura, fitted)
 
         for shape in page.pageShapes:
             draw_shape(c, shape, payload.paginaAltura)
@@ -372,4 +387,44 @@ def build_pdf(payload: GenerateCatalogPdfRequest, client, bucket: str) -> bytes:
         c.showPage()
 
     c.save()
-    return buf.getvalue()
+    content_bytes = buf.getvalue()
+
+    if not pages_with_pdf_bg:
+        return content_bytes
+    return _merge_pdf_backgrounds(content_bytes, pages_with_pdf_bg, pdf_bg_cache, page_w_pt, page_h_pt)
+
+
+def _merge_pdf_backgrounds(
+    content_bytes: bytes,
+    pages_with_pdf_bg: dict[int, str],
+    pdf_bg_cache: dict[str, bytes],
+    page_w_pt: float,
+    page_h_pt: float,
+) -> bytes:
+    """Segundo passo, só quando ao menos uma página usa fundo em PDF:
+    pra cada página marcada, pega a 1ª página do PDF de fundo original
+    (escalada pro tamanho exato da página do catálogo — mesma semântica
+    "stretch" já usada pro fundo em imagem), mescla o conteúdo gerado
+    por cima dela (`merge_page` desenha o argumento SOBRE quem chama) e
+    usa isso como a página final. Reabre um PdfReader novo por uso (não
+    reaproveita a mesma PageObject entre páginas) porque `merge_page`
+    muta o objeto em memória — reaproveitar acumularia conteúdo de
+    página errada."""
+    content_reader = PdfReader(BytesIO(content_bytes))
+    writer = PdfWriter()
+
+    for i, content_page in enumerate(content_reader.pages):
+        bg_key = pages_with_pdf_bg.get(i)
+        if bg_key is None:
+            writer.add_page(content_page)
+            continue
+
+        bg_reader = PdfReader(BytesIO(pdf_bg_cache[bg_key]))
+        bg_page = bg_reader.pages[0]
+        bg_page.scale_to(page_w_pt, page_h_pt)
+        bg_page.merge_page(content_page)
+        writer.add_page(bg_page)
+
+    out = BytesIO()
+    writer.write(out)
+    return out.getvalue()

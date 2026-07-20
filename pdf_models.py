@@ -66,8 +66,20 @@ class PdfBorderSpec(BaseModel):
     width: float
 
 
+# Fundo de página vetorial (upload de PDF, ver pdf_render.py) — em vez
+# de uma imagem raster "stretch", a página inteira do PDF original é
+# mesclada como camada de base do PDF final (ver merge em pdf_logic.py),
+# sem perda de qualidade nenhuma. `kind` discrimina de PdfImageSpec.
+class PdfPdfBackgroundSpec(BaseModel):
+    kind: Literal["pdf"]
+    key: str
+
+
+PdfBackgroundSpec = Annotated[Union[PdfImageSpec, PdfPdfBackgroundSpec], Field(discriminator="kind")]
+
+
 class PdfPageSpec(BaseModel):
-    background: Optional[PdfImageSpec] = None
+    background: Optional[PdfBackgroundSpec] = None
     pageShapes: list[PdfShapeSpec] = []
     pageFields: list[PdfFieldSpec]
     cardBorders: list[PdfBorderSpec]
@@ -79,3 +91,9 @@ class GenerateCatalogPdfRequest(BaseModel):
     paginaLargura: float
     paginaAltura: float
     pages: list[PdfPageSpec]
+
+
+class RenderPdfBackgroundRequest(BaseModel):
+    key: str
+    width: int
+    height: int
