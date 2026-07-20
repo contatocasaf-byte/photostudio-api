@@ -304,6 +304,11 @@ def draw_border(c: "canvas.Canvas", spec: PdfBorderSpec, pagina_altura_px: float
 
 
 def draw_image(c: "canvas.Canvas", spec: PdfImageSpec, pagina_altura_px: float, fitted_image: Image.Image) -> None:
+    # setFillAlpha é estado do CANVAS, não por elemento — sem resetar
+    # aqui, uma forma decorativa desenhada antes (draw_shape) com
+    # opacidade < 1 vaza pra próxima imagem desenhada, deixando-a
+    # semitransparente até o próximo draw_text_fit resetar (linha 246).
+    c.setFillAlpha(1.0)
     x, y, w, h = box_to_pdf_rect(spec.x, spec.y, spec.w, spec.h, pagina_altura_px)
     c.drawImage(ImageReader(fitted_image), x, y, width=w, height=h, mask="auto")
 
