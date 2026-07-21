@@ -35,6 +35,7 @@ class PdfTextSpec(BaseModel):
     color: str
     align: TextAlign
     fontWeight: FontWeight
+    fontFamily: str = "Arial"
     maxLines: int
     lineSpacing: float = 1.15
 

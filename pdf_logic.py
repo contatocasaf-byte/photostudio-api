@@ -22,6 +22,7 @@ from reportlab.lib.utils import ImageReader
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfgen import canvas
 
+from pdf_fonts import resolve_font
 from pdf_models import GenerateCatalogPdfRequest, PdfBorderSpec, PdfImageSpec, PdfPdfBackgroundSpec, PdfShapeSpec, PdfTextSpec
 
 # --- Coordenadas ------------------------------------------------------
@@ -33,13 +34,12 @@ from pdf_models import GenerateCatalogPdfRequest, PdfBorderSpec, PdfImageSpec, P
 # via canvas.scale()/translate()).
 PT_PER_PX = 72 / 150
 
-FONT_NORMAL = "Helvetica"
-FONT_BOLD = "Helvetica-Bold"
-# App inteiro usa só "Arial" fixo em todo campo de texto (sem seletor de
-# fonte neste módulo) — reportlab não tem Arial nativo, mapeia pra
-# Helvetica (mesma família de métricas, built-in, sem precisar embutir
-# arquivo de fonte). Risco já avisado ao usuário: métricas ligeiramente
-# diferentes podem divergir sutilmente do preview em casos extremos.
+# Resolução de fonte real (Google Font curada / fonte própria enviada)
+# fica em pdf_fonts.py — "Arial" (padrão de todo card/página salvo
+# antes da biblioteca de fontes existir, ou família não encontrada)
+# cai em Helvetica, builtin do reportlab. Risco já avisado ao usuário:
+# métricas ligeiramente diferentes podem divergir sutilmente do
+# preview em casos extremos, mesmo com a fonte real embutida.
 
 
 def px_to_pt(v_px: float) -> float:
@@ -212,12 +212,11 @@ def _draw_line(c: "canvas.Canvas", text: str, x_px: float, baseline_y_px: float,
     c.drawString(x_pt, y_pt, text)
 
 
-def draw_text_fit(c: "canvas.Canvas", spec: PdfTextSpec, pagina_altura_px: float) -> None:
+def draw_text_fit(c: "canvas.Canvas", spec: PdfTextSpec, pagina_altura_px: float, font_name: str) -> None:
     """Porta de drawTextFit: busca linear do maior tamanho de fonte (até
     o piso) que quebra em <= maxLines linhas sem estourar maxW; se nem
-    no piso couber, cai pro fallback de reticências."""
-    font_name = FONT_BOLD if spec.fontWeight == "bold" else FONT_NORMAL
-
+    no piso couber, cai pro fallback de reticências. `font_name` já vem
+    resolvido (pdf_fonts.resolve_font) — real ou Helvetica de fallback."""
     floor = min(spec.minSize, spec.fontSizeMax)
     lines = [spec.text]
     used_size = floor
@@ -338,7 +337,8 @@ def _draw_field_op(
             fitted = fit_image_on_box(img, op.w, op.h)
         draw_image(c, op, pagina_altura_px, fitted)
     else:
-        draw_text_fit(c, op, pagina_altura_px)
+        font_name = resolve_font(op.fontFamily, op.fontWeight == "bold", client, bucket)
+        draw_text_fit(c, op, pagina_altura_px, font_name)
 
 
 def build_pdf(payload: GenerateCatalogPdfRequest, client, bucket: str) -> bytes:
