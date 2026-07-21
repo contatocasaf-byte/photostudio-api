@@ -75,12 +75,16 @@ def _fetch_google_font_ttf(family: str, weight: int) -> bytes | None:
 
     result: bytes | None = None
     try:
+        # URL montada crua (não via params=) — o "+" que separa palavras
+        # do nome da família (exigido pela API CSS2 do Google) precisa
+        # ficar literal na query string; requests.get(params=...) sempre
+        # re-codifica valores, transformando "+" em "%2B" (que o Google
+        # não entende como espaço), e a API devolve 400 pra QUALQUER
+        # família com espaço no nome (Bebas Neue, Abril Fatface etc.) —
+        # famílias de uma palavra só (Montserrat) mascaravam esse bug.
         family_param = family.replace(" ", "+")
-        css_res = requests.get(
-            "https://fonts.googleapis.com/css2",
-            params={"family": f"{family_param}:wght@{weight}", "display": "swap"},
-            timeout=10,
-        )
+        url = f"https://fonts.googleapis.com/css2?family={family_param}:wght@{weight}&display=swap"
+        css_res = requests.get(url, timeout=10)
         if css_res.ok:
             match = re.search(r"url\((https://fonts\.gstatic\.com/[^)]+)\)", css_res.text)
             if match:
