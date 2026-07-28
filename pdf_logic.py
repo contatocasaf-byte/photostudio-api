@@ -212,6 +212,46 @@ def _draw_line(c: "canvas.Canvas", text: str, x_px: float, baseline_y_px: float,
     c.drawString(x_pt, y_pt, text)
 
 
+# Proporção descent/capHeight do Helvetica (0.207/0.718) — usada como
+# aproximação universal do "quanto um 'g' desce" quando a fonte não
+# expõe essa métrica diretamente (ver _tight_ascent_descent).
+_DESCENT_RATIO = 0.207 / 0.718
+
+
+def _tight_ascent_descent(font_name: str, size: float) -> tuple[float, float]:
+    """Ascent/descent "justos", pra bater com o que o navegador mede via
+    ctx.measureText("Ag").actualBoundingBoxAscent/Descent (bounding box
+    real dos glifos desenhados) — usado no editor/preview (canvasText.ts).
+
+    pdfmetrics.getAscentDescent() devolve a métrica "hhea" da fonte
+    inteira, pensada pra reservar espaço pra QUALQUER glifo dela
+    (acentos, swashes, etc.), não o texto real desenhado. Pra fontes
+    decorativas embutidas (Google Fonts como Bebas Neue/Abril Fatface)
+    isso vem bem maior que o necessário — confirmado: Abril Fatface tem
+    ascent hhea de 105.8% do tamanho da fonte, contra ~71.8% do
+    Helvetica — e como baseline_y = y + ascent, esse excesso empurra a
+    linha de base (e o texto inteiro) pra baixo dentro do card,
+    divergindo visivelmente do editor/preview (texto encostando na
+    base da forma em vez de centralizado verticalmente, print real do
+    usuário comparando os dois).
+
+    capHeight (altura de "A" maiúsculo) é uma métrica bem mais estável
+    entre fontes (~70-84% do tamanho, testado em 6 fontes reais da
+    lista curada) e corresponde de perto ao que o navegador mede pra
+    "A" — usa ela como ascent "justo" quando disponível (fontes TTF
+    embutidas via TTFont); fontes builtin do reportlab (Helvetica) não
+    expõem capHeight e caem no getAscentDescent original, que já é
+    coerente o bastante nelas."""
+    try:
+        cap_height = pdfmetrics.getFont(font_name).face.capHeight
+    except Exception:
+        cap_height = 0
+    if not cap_height or cap_height <= 0:
+        return pdfmetrics.getAscentDescent(font_name, size)
+    ascent = cap_height / 1000 * size
+    return ascent, -ascent * _DESCENT_RATIO
+
+
 def draw_text_fit(c: "canvas.Canvas", spec: PdfTextSpec, pagina_altura_px: float, font_name: str) -> None:
     """Porta de drawTextFit: busca linear do maior tamanho de fonte (até
     o piso) que quebra em <= maxLines linhas sem estourar maxW; se nem
@@ -237,7 +277,7 @@ def draw_text_fit(c: "canvas.Canvas", spec: PdfTextSpec, pagina_altura_px: float
         used_size = floor
         lines, _ = wrap_text_to_lines(spec.text, font_name, floor, spec.maxW, spec.maxLines, True)
 
-    ascent, descent = pdfmetrics.getAscentDescent(font_name, used_size)
+    ascent, descent = _tight_ascent_descent(font_name, used_size)
     line_h = (ascent + abs(descent)) * spec.lineSpacing
 
     c.setFont(font_name, px_to_pt(used_size))
