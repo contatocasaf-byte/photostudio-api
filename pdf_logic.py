@@ -114,6 +114,32 @@ def get_content_center(alpha: np.ndarray, bbox: tuple[int, int, int, int], thres
     return left + cx_local, top + cy_local
 
 
+def _resize_rgba_premultiplied(img: Image.Image, size: tuple[int, int], resample) -> Image.Image:
+    """Redimensiona uma imagem RGBA sem o halo escuro que aparece perto
+    da borda de objetos claros contra fundo branco — o Pillow interpola
+    R/G/B/A de forma independente (sem pré-multiplicar), então pixels
+    quase-transparentes perto da borda do objeto "vazam" sua cor RGB
+    crua (tipicamente preta, sobrando do fundo removido) pro resultado
+    reamostrado. Pré-multiplicar antes de reamostrar e desfazer depois
+    é o fix padrão desse problema conhecido do Pillow. Invisível em
+    objetos escuros (o halo se confunde com o próprio objeto) — só
+    ficou visível numa peça metálica clara contra a página branca."""
+    r, g, b, a = img.split()
+    a_arr = np.asarray(a, dtype=np.float32) / 255.0
+    rgb_arr = np.asarray(Image.merge("RGB", (r, g, b)), dtype=np.float32)
+    premultiplied = Image.fromarray((rgb_arr * a_arr[..., None]).astype(np.uint8), "RGB")
+
+    premultiplied_resized = premultiplied.resize(size, resample)
+    a_resized = a.resize(size, resample)
+
+    a_resized_arr = np.asarray(a_resized, dtype=np.float32) / 255.0
+    premultiplied_resized_arr = np.asarray(premultiplied_resized, dtype=np.float32)
+    safe_alpha = np.maximum(a_resized_arr, 1e-6)
+    rgb_resized = np.clip(premultiplied_resized_arr / safe_alpha[..., None], 0, 255).astype(np.uint8)
+
+    return Image.merge("RGBA", (*Image.fromarray(rgb_resized, "RGB").split(), a_resized))
+
+
 def fit_image_on_box(img: Image.Image, box_w: float, box_h: float) -> Image.Image:
     """Porta de fitImageOnCanvas (transform sempre {} — catálogo nunca
     usa rotação/zoom/offset manual): região de interesse simétrica em
@@ -150,7 +176,7 @@ def fit_image_on_box(img: Image.Image, box_w: float, box_h: float) -> Image.Imag
     scale = min(box_w / rw, box_h / rh) * FILL_RATIO
     nw = max(1, round(rw * scale))
     nh = max(1, round(rh * scale))
-    resized = roi.resize((nw, nh), Image.LANCZOS)
+    resized = _resize_rgba_premultiplied(roi, (nw, nh), Image.LANCZOS)
 
     dest_x = round((box_w - nw) / 2)
     dest_y = round((box_h - nh) / 2)
