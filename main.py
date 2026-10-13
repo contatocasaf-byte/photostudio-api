@@ -1,4 +1,6 @@
 import os
+import threading
+import time
 import uuid
 from io import BytesIO
 from typing import Optional
@@ -112,6 +114,14 @@ def remove_background(
     return {"resultKey": result_key}
 
 
+def _build_and_store_pdf(body: GenerateCatalogPdfRequest) -> tuple[str, int]:
+    client = get_r2_client()
+    pdf_bytes, skipped = pdf_logic.build_pdf(body, client, BUCKET)
+    result_key = f"catalogos/pdf/{uuid.uuid4()}.pdf"
+    client.put_object(Bucket=BUCKET, Key=result_key, Body=pdf_bytes, ContentType="application/pdf")
+    return result_key, skipped
+
+
 @app.post("/catalogos/pdf")
 def generate_catalog_pdf(
     body: GenerateCatalogPdfRequest,
@@ -119,16 +129,63 @@ def generate_catalog_pdf(
 ):
     check_secret(x_shared_secret)
 
-    client = get_r2_client()
     try:
-        pdf_bytes = pdf_logic.build_pdf(body, client, BUCKET)
+        result_key, skipped = _build_and_store_pdf(body)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Falha ao gerar PDF: {e}")
 
-    result_key = f"catalogos/pdf/{uuid.uuid4()}.pdf"
-    client.put_object(Bucket=BUCKET, Key=result_key, Body=pdf_bytes, ContentType="application/pdf")
+    return {"resultKey": result_key, "imagensIgnoradas": skipped}
 
-    return {"resultKey": result_key}
+
+# Geração em segundo plano: a rota da Vercel tem teto de 60s por
+# requisição, e catálogo grande passa disso. Aqui o trabalho roda numa
+# thread e o cliente consulta o andamento (/status). Estado em memória —
+# a instância é única; se o serviço reiniciar no meio do trabalho, o
+# status some e o cliente recebe "não encontrado" (basta gerar de novo).
+_pdf_jobs: dict[str, dict] = {}
+_pdf_jobs_lock = threading.Lock()
+PDF_JOB_TTL_SECONDS = 3600
+
+
+def _run_pdf_job(job_id: str, body: GenerateCatalogPdfRequest) -> None:
+    try:
+        result_key, skipped = _build_and_store_pdf(body)
+        update = {"status": "done", "resultKey": result_key, "imagensIgnoradas": skipped}
+    except Exception as e:
+        update = {"status": "error", "error": f"Falha ao gerar PDF: {e}"}
+    with _pdf_jobs_lock:
+        _pdf_jobs[job_id].update(update)
+
+
+@app.post("/catalogos/pdf/start")
+def start_catalog_pdf(
+    body: GenerateCatalogPdfRequest,
+    x_shared_secret: Optional[str] = Header(default=None),
+):
+    check_secret(x_shared_secret)
+
+    now = time.time()
+    job_id = str(uuid.uuid4())
+    with _pdf_jobs_lock:
+        for old_id in [k for k, v in _pdf_jobs.items() if now - v["created"] > PDF_JOB_TTL_SECONDS]:
+            del _pdf_jobs[old_id]
+        _pdf_jobs[job_id] = {"status": "running", "created": now}
+
+    threading.Thread(target=_run_pdf_job, args=(job_id, body), daemon=True).start()
+    return {"jobId": job_id}
+
+
+@app.get("/catalogos/pdf/status/{job_id}")
+def catalog_pdf_status(job_id: str, x_shared_secret: Optional[str] = Header(default=None)):
+    check_secret(x_shared_secret)
+
+    with _pdf_jobs_lock:
+        job = _pdf_jobs.get(job_id)
+        result = dict(job) if job else None
+    if result is None:
+        raise HTTPException(status_code=404, detail="Trabalho não encontrado (o serviço pode ter reiniciado) — gere o PDF de novo.")
+    result.pop("created", None)
+    return result
 
 
 @app.post("/catalogos/render-pdf-background")

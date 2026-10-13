@@ -12,6 +12,7 @@
 #     opaco, usando Pillow+numpy no lugar de getImageData. O catálogo
 #     nunca passa rotação/zoom/offset manual de foto (confirmado lendo
 #     PreviewPageCanvas.tsx), então a porta não precisa suportar isso.
+from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 
 import numpy as np
@@ -381,22 +382,81 @@ def draw_image(c: "canvas.Canvas", spec: PdfImageSpec, pagina_altura_px: float, 
 # --- Orquestrador -------------------------------------------------------
 
 
-def fetch_image_cached(key: str, cache: dict[str, Image.Image], client, bucket: str) -> Image.Image:
-    """Busca cada chave do R2 no máximo uma vez por geração — logo/fundo
-    tipicamente se repetem em várias páginas, e uma foto de produto pode
-    se repetir se o mesmo produto aparecer mais de uma vez."""
-    if key not in cache:
-        obj = client.get_object(Bucket=bucket, Key=key)
-        data = obj["Body"].read()
-        cache[key] = Image.open(BytesIO(data)).convert("RGBA")
-    return cache[key]
+PREFETCH_WORKERS = 8
+
+
+class ImageStore:
+    """Imagens do R2 do catálogo inteiro, buscadas em paralelo ANTES de
+    desenhar (antes era 1 requisição sequencial por imagem — catálogo
+    grande passava de 1 minuto só nisso). Guarda os bytes crus (leves) e
+    decodifica sob demanda: só fica decodificada na memória a imagem
+    usada em mais de um lugar (logo/fundo repetidos em várias páginas) —
+    foto de produto usada uma vez é descartada logo depois de desenhada,
+    em vez de acumular centenas de RGBA em memória.
+
+    Imagem que não pôde ser baixada/decodificada não derruba o PDF
+    inteiro: `get` devolve None, o chamador simplesmente não desenha, e
+    `failed` conta quantas ficaram de fora."""
+
+    def __init__(self, client, bucket: str, usage: dict[str, int]):
+        self._usage = usage
+        self._decoded: dict[str, Image.Image] = {}
+        self._raw: dict[str, bytes] = {}
+        self.failed: set[str] = set()
+
+        def fetch(key: str) -> tuple[str, bytes | None]:
+            try:
+                return key, client.get_object(Bucket=bucket, Key=key)["Body"].read()
+            except Exception:
+                return key, None
+
+        with ThreadPoolExecutor(max_workers=PREFETCH_WORKERS) as pool:
+            for key, data in pool.map(fetch, usage.keys()):
+                if data is None:
+                    self.failed.add(key)
+                else:
+                    self._raw[key] = data
+
+    def get(self, key: str) -> Image.Image | None:
+        if key in self._decoded:
+            return self._decoded[key]
+        data = self._raw.get(key)
+        if data is None:
+            return None
+        try:
+            img = Image.open(BytesIO(data)).convert("RGBA")
+        except Exception:
+            self.failed.add(key)
+            return None
+        if self._usage.get(key, 0) > 1:
+            self._decoded[key] = img
+        return img
+
+
+def _collect_image_usage(payload: GenerateCatalogPdfRequest) -> dict[str, int]:
+    """Quantas vezes cada chave de imagem aparece no payload (inclui
+    fundos raster; fundo em PDF é tratado à parte)."""
+    usage: dict[str, int] = {}
+
+    def add(key: str) -> None:
+        usage[key] = usage.get(key, 0) + 1
+
+    for page in payload.pages:
+        if isinstance(page.background, PdfImageSpec):
+            add(page.background.key)
+        for op in (*page.pageFields, *page.cardFields):
+            if isinstance(op, PdfImageSpec):
+                add(op.key)
+    return usage
 
 
 def _draw_field_op(
-    c: "canvas.Canvas", op, pagina_altura_px: float, cache: dict[str, Image.Image], client, bucket: str
+    c: "canvas.Canvas", op, pagina_altura_px: float, store: ImageStore, client, bucket: str
 ) -> None:
     if isinstance(op, PdfImageSpec):
-        img = fetch_image_cached(op.key, cache, client, bucket)
+        img = store.get(op.key)
+        if img is None:
+            return
         if op.fit == "stretch":
             fitted = img.resize((max(1, round(op.w)), max(1, round(op.h))))
         else:
@@ -407,7 +467,7 @@ def _draw_field_op(
         draw_text_fit(c, op, pagina_altura_px, font_name)
 
 
-def build_pdf(payload: GenerateCatalogPdfRequest, client, bucket: str) -> bytes:
+def build_pdf(payload: GenerateCatalogPdfRequest, client, bucket: str) -> tuple[bytes, int]:
     """Monta o PDF página a página, respeitando a MESMA ordem de
     camadas do preview (PreviewPageCanvas.tsx): fundo -> formas de
     página -> campos de cabeçalho/rodapé -> bordas de card -> formas de
@@ -424,7 +484,7 @@ def build_pdf(payload: GenerateCatalogPdfRequest, client, bucket: str) -> bytes:
     page_h_pt = px_to_pt(payload.paginaAltura)
     c = canvas.Canvas(buf, pagesize=(page_w_pt, page_h_pt))
 
-    image_cache: dict[str, Image.Image] = {}
+    store = ImageStore(client, bucket, _collect_image_usage(payload))
     pdf_bg_cache: dict[str, bytes] = {}
     pages_with_pdf_bg: dict[int, str] = {}
 
@@ -436,15 +496,16 @@ def build_pdf(payload: GenerateCatalogPdfRequest, client, bucket: str) -> bytes:
                     obj = client.get_object(Bucket=bucket, Key=page.background.key)
                     pdf_bg_cache[page.background.key] = obj["Body"].read()
             else:
-                img = fetch_image_cached(page.background.key, image_cache, client, bucket)
-                fitted = img.resize((max(1, round(page.background.w)), max(1, round(page.background.h))))
-                draw_image(c, page.background, payload.paginaAltura, fitted)
+                img = store.get(page.background.key)
+                if img is not None:
+                    fitted = img.resize((max(1, round(page.background.w)), max(1, round(page.background.h))))
+                    draw_image(c, page.background, payload.paginaAltura, fitted)
 
         for shape in page.pageShapes:
             draw_shape(c, shape, payload.paginaAltura)
 
         for op in page.pageFields:
-            _draw_field_op(c, op, payload.paginaAltura, image_cache, client, bucket)
+            _draw_field_op(c, op, payload.paginaAltura, store, client, bucket)
 
         for border in page.cardBorders:
             draw_border(c, border, payload.paginaAltura)
@@ -453,16 +514,17 @@ def build_pdf(payload: GenerateCatalogPdfRequest, client, bucket: str) -> bytes:
             draw_shape(c, shape, payload.paginaAltura)
 
         for op in page.cardFields:
-            _draw_field_op(c, op, payload.paginaAltura, image_cache, client, bucket)
+            _draw_field_op(c, op, payload.paginaAltura, store, client, bucket)
 
         c.showPage()
 
     c.save()
     content_bytes = buf.getvalue()
 
+    skipped = len(store.failed)
     if not pages_with_pdf_bg:
-        return content_bytes
-    return _merge_pdf_backgrounds(content_bytes, pages_with_pdf_bg, pdf_bg_cache, page_w_pt, page_h_pt)
+        return content_bytes, skipped
+    return _merge_pdf_backgrounds(content_bytes, pages_with_pdf_bg, pdf_bg_cache, page_w_pt, page_h_pt), skipped
 
 
 def _merge_pdf_backgrounds(
