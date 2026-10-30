@@ -19,6 +19,9 @@ app = FastAPI()
 
 BUCKET = os.environ.get("R2_BUCKET_NAME", "")
 SHARED_SECRET = os.environ.get("BACKEND_SHARED_SECRET", "")
+# Bucket PRIVADO com o cache das fotos da galeria (Drive) — as fotos do
+# catálogo vêm de lá nas chaves "galeria/...". Vazio = recurso desligado.
+GALERIA_BUCKET = os.environ.get("R2_GALERIA_BUCKET_NAME", "")
 
 _session = None
 
@@ -80,7 +83,10 @@ class RemoveBackgroundRequest(BaseModel):
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    # `galeria`: este servidor sabe ler o bucket do cache de fotos — o
+    # frontend só manda chaves "galeria/..." no PDF se isto for true (senão
+    # as fotos sumiriam do PDF).
+    return {"status": "ok", "galeria": bool(GALERIA_BUCKET)}
 
 
 @app.post("/remove-background")
@@ -116,7 +122,7 @@ def remove_background(
 
 def _build_and_store_pdf(body: GenerateCatalogPdfRequest) -> tuple[str, int]:
     client = get_r2_client()
-    pdf_bytes, skipped = pdf_logic.build_pdf(body, client, BUCKET)
+    pdf_bytes, skipped = pdf_logic.build_pdf(body, client, BUCKET, GALERIA_BUCKET)
     result_key = f"catalogos/pdf/{uuid.uuid4()}.pdf"
     client.put_object(Bucket=BUCKET, Key=result_key, Body=pdf_bytes, ContentType="application/pdf")
     return result_key, skipped

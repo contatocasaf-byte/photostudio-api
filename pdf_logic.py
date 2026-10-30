@@ -398,15 +398,18 @@ class ImageStore:
     inteiro: `get` devolve None, o chamador simplesmente não desenha, e
     `failed` conta quantas ficaram de fora."""
 
-    def __init__(self, client, bucket: str, usage: dict[str, int]):
+    def __init__(self, client, bucket: str, usage: dict[str, int], galeria_bucket: str = ""):
         self._usage = usage
         self._decoded: dict[str, Image.Image] = {}
         self._raw: dict[str, bytes] = {}
         self.failed: set[str] = set()
 
         def fetch(key: str) -> tuple[str, bytes | None]:
+            # Fotos da galeria (cache do Drive) ficam num bucket PRIVADO à
+            # parte; as demais imagens (logo, fundo, ilustração) no principal.
+            alvo = galeria_bucket if (galeria_bucket and key.startswith("galeria/")) else bucket
             try:
-                return key, client.get_object(Bucket=bucket, Key=key)["Body"].read()
+                return key, client.get_object(Bucket=alvo, Key=key)["Body"].read()
             except Exception:
                 return key, None
 
@@ -467,7 +470,7 @@ def _draw_field_op(
         draw_text_fit(c, op, pagina_altura_px, font_name)
 
 
-def build_pdf(payload: GenerateCatalogPdfRequest, client, bucket: str) -> tuple[bytes, int]:
+def build_pdf(payload: GenerateCatalogPdfRequest, client, bucket: str, galeria_bucket: str = "") -> tuple[bytes, int]:
     """Monta o PDF página a página, respeitando a MESMA ordem de
     camadas do preview (PreviewPageCanvas.tsx): fundo -> formas de
     página -> campos de cabeçalho/rodapé -> bordas de card -> formas de
@@ -484,7 +487,7 @@ def build_pdf(payload: GenerateCatalogPdfRequest, client, bucket: str) -> tuple[
     page_h_pt = px_to_pt(payload.paginaAltura)
     c = canvas.Canvas(buf, pagesize=(page_w_pt, page_h_pt))
 
-    store = ImageStore(client, bucket, _collect_image_usage(payload))
+    store = ImageStore(client, bucket, _collect_image_usage(payload), galeria_bucket)
     pdf_bg_cache: dict[str, bytes] = {}
     pages_with_pdf_bg: dict[int, str] = {}
 
