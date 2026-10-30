@@ -81,12 +81,34 @@ class RemoveBackgroundRequest(BaseModel):
     key: str
 
 
+_galeria_ok_cache: dict = {"ate": 0.0, "valor": False}
+
+
+def galeria_acessivel() -> bool:
+    """O bucket do cache de fotos está configurado E as credenciais deste
+    servidor conseguem acessá-lo (HeadBucket). Resultado guardado por 60s —
+    o /health pode ser chamado com frequência."""
+    if not GALERIA_BUCKET:
+        return False
+    agora = time.time()
+    if agora < _galeria_ok_cache["ate"]:
+        return _galeria_ok_cache["valor"]
+    try:
+        get_r2_client().head_bucket(Bucket=GALERIA_BUCKET)
+        valor = True
+    except Exception:
+        valor = False
+    _galeria_ok_cache.update({"ate": agora + 60, "valor": valor})
+    return valor
+
+
 @app.get("/health")
 def health():
     # `galeria`: este servidor sabe ler o bucket do cache de fotos — o
     # frontend só manda chaves "galeria/..." no PDF se isto for true (senão
-    # as fotos sumiriam do PDF).
-    return {"status": "ok", "galeria": bool(GALERIA_BUCKET)}
+    # as fotos sumiriam do PDF). Testa o acesso de verdade, não só a
+    # existência da variável (token sem permissão no bucket = false).
+    return {"status": "ok", "galeria": galeria_acessivel()}
 
 
 @app.post("/remove-background")
