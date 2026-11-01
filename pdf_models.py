@@ -22,6 +22,11 @@ class PdfImageSpec(BaseModel):
     w: float
     h: float
     fit: ImageFit
+    # Campo "Foto do Produto" do card: cantos arredondados (px de página; a
+    # imagem é recortada neles) e fundo atrás dela. Payloads antigos não mandam.
+    raio: float = 0
+    fundoCor: Optional[str] = None
+    fundoOpacidade: float = 1.0
 
 
 class PdfTextSpec(BaseModel):
@@ -60,6 +65,20 @@ class PdfShapeSpec(BaseModel):
     raio: float = 0
 
 
+# Contorno ARREDONDADO de um card (retângulo só com traço, sem preenchimento) —
+# usado no lugar das 4 linhas retas (PdfBorderSpec) quando o card tem cantos
+# arredondados.
+class PdfOutlineSpec(BaseModel):
+    x: float
+    y: float
+    w: float
+    h: float
+    raio: float = 0
+    color: str
+    opacity: float
+    width: float
+
+
 class PdfBorderSpec(BaseModel):
     x1: float
     y1: float
@@ -86,7 +105,11 @@ class PdfPageSpec(BaseModel):
     background: Optional[PdfBackgroundSpec] = None
     pageShapes: list[PdfShapeSpec] = []
     pageFields: list[PdfFieldSpec]
+    # Fundo de cada card (retângulo, com cantos arredondados se houver) — vem
+    # ANTES do contorno e das formas.
+    cardBackgrounds: list[PdfShapeSpec] = []
     cardBorders: list[PdfBorderSpec]
+    cardOutlines: list[PdfOutlineSpec] = []
     cardShapes: list[PdfShapeSpec]
     cardFields: list[PdfFieldSpec]
 

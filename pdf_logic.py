@@ -25,7 +25,15 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfgen import canvas
 
 from pdf_fonts import resolve_font
-from pdf_models import GenerateCatalogPdfRequest, PdfBorderSpec, PdfImageSpec, PdfPdfBackgroundSpec, PdfShapeSpec, PdfTextSpec
+from pdf_models import (
+    GenerateCatalogPdfRequest,
+    PdfBorderSpec,
+    PdfImageSpec,
+    PdfOutlineSpec,
+    PdfPdfBackgroundSpec,
+    PdfShapeSpec,
+    PdfTextSpec,
+)
 
 # --- Coordenadas ------------------------------------------------------
 # Espaço da app: px a 150dpi (mesma convenção de PX_PER_MM em
@@ -420,6 +428,20 @@ def draw_border(c: "canvas.Canvas", spec: PdfBorderSpec, pagina_altura_px: float
     c.line(x1, y1, x2, y2)
 
 
+def draw_outline(c: "canvas.Canvas", spec: PdfOutlineSpec, pagina_altura_px: float) -> None:
+    """Contorno de card com cantos arredondados (só traço). O traço fica
+    centrado na borda, igual às linhas retas de draw_border."""
+    x, y, w, h = box_to_pdf_rect(spec.x, spec.y, spec.w, spec.h, pagina_altura_px)
+    c.setStrokeColor(HexColor(spec.color))
+    c.setStrokeAlpha(spec.opacity)
+    c.setLineWidth(px_to_pt(spec.width))
+    raio = max(0.0, min(spec.raio, spec.w / 2, spec.h / 2))
+    if raio > 0:
+        c.roundRect(x, y, w, h, px_to_pt(raio), stroke=1, fill=0)
+    else:
+        c.rect(x, y, w, h, stroke=1, fill=0)
+
+
 def draw_image(c: "canvas.Canvas", spec: PdfImageSpec, pagina_altura_px: float, fitted_image: Image.Image) -> None:
     # setFillAlpha é estado do CANVAS, não por elemento — sem resetar
     # aqui, uma forma decorativa desenhada antes (draw_shape) com
@@ -427,7 +449,29 @@ def draw_image(c: "canvas.Canvas", spec: PdfImageSpec, pagina_altura_px: float, 
     # semitransparente até o próximo draw_text_fit resetar (linha 246).
     c.setFillAlpha(1.0)
     x, y, w, h = box_to_pdf_rect(spec.x, spec.y, spec.w, spec.h, pagina_altura_px)
-    c.drawImage(ImageReader(fitted_image), x, y, width=w, height=h, mask="auto")
+    raio = max(0.0, min(spec.raio, spec.w / 2, spec.h / 2))
+
+    # Fundo atrás da foto (cor + transparência), com os mesmos cantos.
+    if spec.fundoCor:
+        c.setFillColor(HexColor(spec.fundoCor))
+        c.setFillAlpha(spec.fundoOpacidade)
+        if raio > 0:
+            c.roundRect(x, y, w, h, px_to_pt(raio), fill=1, stroke=0)
+        else:
+            c.rect(x, y, w, h, fill=1, stroke=0)
+        c.setFillAlpha(1.0)
+
+    if raio > 0:
+        # Recorta a foto no retângulo arredondado (vale também pra foto sem
+        # transparência, ex.: JPG).
+        c.saveState()
+        path = c.beginPath()
+        path.roundRect(x, y, w, h, px_to_pt(raio))
+        c.clipPath(path, stroke=0, fill=0)
+        c.drawImage(ImageReader(fitted_image), x, y, width=w, height=h, mask="auto")
+        c.restoreState()
+    else:
+        c.drawImage(ImageReader(fitted_image), x, y, width=w, height=h, mask="auto")
 
 
 # --- Orquestrador -------------------------------------------------------
@@ -524,8 +568,8 @@ def _draw_field_op(
 def build_pdf(payload: GenerateCatalogPdfRequest, client, bucket: str, galeria_bucket: str = "") -> tuple[bytes, int]:
     """Monta o PDF página a página, respeitando a MESMA ordem de
     camadas do preview (PreviewPageCanvas.tsx): fundo -> formas de
-    página -> campos de cabeçalho/rodapé -> bordas de card -> formas de
-    card -> campos de card. Cada `page.showPage()` fecha a página atual
+    página -> campos de cabeçalho/rodapé -> fundo de card -> bordas de card
+    -> formas de card -> campos de card. Cada `page.showPage()` fecha a página atual
     e abre a seguinte.
 
     Fundo em PDF (upload de PDF, ver pdf_render.py) é um caso à parte:
@@ -561,8 +605,14 @@ def build_pdf(payload: GenerateCatalogPdfRequest, client, bucket: str, galeria_b
         for op in page.pageFields:
             _draw_field_op(c, op, payload.paginaAltura, store, client, bucket)
 
+        for shape in page.cardBackgrounds:
+            draw_shape(c, shape, payload.paginaAltura)
+
         for border in page.cardBorders:
             draw_border(c, border, payload.paginaAltura)
+
+        for outline in page.cardOutlines:
+            draw_outline(c, outline, payload.paginaAltura)
 
         for shape in page.cardShapes:
             draw_shape(c, shape, payload.paginaAltura)
