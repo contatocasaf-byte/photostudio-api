@@ -43,6 +43,9 @@ class PdfTextSpec(BaseModel):
     fontFamily: str = "Arial"
     maxLines: int
     lineSpacing: float = 1.15
+    # "destacado" = preço no estilo etiqueta (valor inteiro grande, R$ e centavos
+    # pequenos no alto). Ausente = texto comum.
+    precoEstilo: Optional[str] = None
 
 
 # Discriminador explícito por "kind" — mais robusto que deixar o

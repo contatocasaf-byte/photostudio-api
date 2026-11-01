@@ -13,6 +13,7 @@
 #     nunca passa rotação/zoom/offset manual de foto (confirmado lendo
 #     PreviewPageCanvas.tsx), então a porta não precisa suportar isso.
 import math
+import re
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 
@@ -288,11 +289,98 @@ def _tight_ascent_descent(font_name: str, size: float) -> tuple[float, float]:
     return ascent, -ascent * _DESCENT_RATIO
 
 
+# --- Preço no estilo "etiqueta" (valor inteiro grande, R$ e centavos pequenos no
+# alto). Espelho EXATO de src/lib/precoDestacado.ts (frontend): mesmas
+# constantes, mesma busca de tamanho, mesmo alinhamento pelo topo. Se mudar lá,
+# mude aqui.
+ESC_SIMBOLO = 0.33
+ESC_CENTAVOS = 0.47
+ESC_TEXTO = 0.47
+_FOLGA_SIMBOLO = 0.04
+_FOLGA_CENTAVOS = 0.02
+_FOLGA_TEXTO = 0.1
+
+_RE_PRECO = re.compile(r"^(.*?)R\$\s*(\d{1,3}(?:\.\d{3})+|\d+),(\d{2})(.*)$", re.DOTALL)
+
+
+def separar_preco(texto: str) -> dict | None:
+    m = _RE_PRECO.match(texto)
+    if not m:
+        return None
+    return {"prefixo": m.group(1).strip(), "inteiro": m.group(2), "centavos": "," + m.group(3), "sufixo": m.group(4).strip()}
+
+
+def _montar_partes_preco(p: dict, s: float) -> list[tuple[str, float, float]]:
+    """[(texto, tamanho, folga_depois)] pro valor inteiro em tamanho `s`."""
+    out: list[tuple[str, float, float]] = []
+    if p["prefixo"]:
+        out.append((p["prefixo"], s * ESC_TEXTO, s * _FOLGA_TEXTO))
+    out.append(("R$", s * ESC_SIMBOLO, s * _FOLGA_SIMBOLO))
+    out.append((p["inteiro"], s, s * _FOLGA_CENTAVOS))
+    out.append((p["centavos"], s * ESC_CENTAVOS, s * _FOLGA_TEXTO if p["sufixo"] else 0.0))
+    if p["sufixo"]:
+        out.append((p["sufixo"], s * ESC_TEXTO, 0.0))
+    return out
+
+
+def layout_preco_destacado(p: dict, tamanho_max: float, piso: float, max_w: float, x: float, y: float, align: str, medir, ascent):
+    """[(texto, tamanho, x, baseline_y)] — `medir(texto, tamanho)` e
+    `ascent(tamanho)` vêm do chamador (reportlab no PDF, fake nos testes)."""
+
+    def largura_total(s: float) -> float:
+        return sum(medir(t, tam) + folga for t, tam, folga in _montar_partes_preco(p, s))
+
+    piso = min(piso, tamanho_max)
+    usado = piso
+    s = tamanho_max
+    while s >= piso:
+        if largura_total(s) <= max_w:
+            usado = s
+            break
+        s -= 1
+
+    w = largura_total(usado)
+    cursor = x
+    if align == "center":
+        cursor = x + (max_w - w) / 2
+    elif align == "right":
+        cursor = x + (max_w - w)
+
+    out = []
+    for texto, tam, folga in _montar_partes_preco(p, usado):
+        out.append((texto, tam, cursor, y + ascent(tam)))
+        cursor += medir(texto, tam) + folga
+    return out
+
+
+def _draw_preco_destacado(c: "canvas.Canvas", spec: PdfTextSpec, pagina_altura_px: float, font_name: str) -> bool:
+    partes = separar_preco(spec.text)
+    if partes is None:
+        return False
+
+    def medir(t: str, tam: float) -> float:
+        return pdfmetrics.stringWidth(t, font_name, tam)
+
+    def ascent(tam: float) -> float:
+        return _tight_ascent_descent(font_name, tam)[0]
+
+    ops = layout_preco_destacado(partes, spec.fontSizeMax, spec.minSize, spec.maxW, spec.x, spec.y, spec.align, medir, ascent)
+    c.setFillColor(HexColor(spec.color))
+    c.setFillAlpha(1.0)
+    for texto, tam, x, baseline in ops:
+        c.setFont(font_name, px_to_pt(tam))
+        _draw_line(c, texto, x, baseline, pagina_altura_px)
+    return True
+
+
 def draw_text_fit(c: "canvas.Canvas", spec: PdfTextSpec, pagina_altura_px: float, font_name: str) -> None:
     """Porta de drawTextFit: busca linear do maior tamanho de fonte (até
     o piso) que quebra em <= maxLines linhas sem estourar maxW; se nem
     no piso couber, cai pro fallback de reticências. `font_name` já vem
     resolvido (pdf_fonts.resolve_font) — real ou Helvetica de fallback."""
+    if spec.precoEstilo == "destacado" and _draw_preco_destacado(c, spec, pagina_altura_px, font_name):
+        return
+
     floor = min(spec.minSize, spec.fontSizeMax)
     lines = [spec.text]
     used_size = floor
