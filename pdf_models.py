@@ -55,6 +55,9 @@ class PdfShapeSpec(BaseModel):
     h: float
     color: str
     opacity: float
+    # Raio dos cantos arredondados (retângulo/triângulo), em px de página.
+    # 0 = cantos retos (payloads antigos não mandam o campo).
+    raio: float = 0
 
 
 class PdfBorderSpec(BaseModel):

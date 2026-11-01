@@ -12,6 +12,7 @@
 #     opaco, usando Pillow+numpy no lugar de getImageData. O catálogo
 #     nunca passa rotação/zoom/offset manual de foto (confirmado lendo
 #     PreviewPageCanvas.tsx), então a porta não precisa suportar isso.
+import math
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 
@@ -336,27 +337,77 @@ def draw_text_fit(c: "canvas.Canvas", spec: PdfTextSpec, pagina_altura_px: float
 # --- Formas / bordas / imagens (geometria trivial, já resolvida pelo payload) ---
 
 
+def caminho_triangulo(w: float, h: float, raio: float) -> list[tuple[str, list[float]]]:
+    """Contorno do triângulo (espaço da forma, y pra baixo), com cantos
+    arredondados quando raio > 0. Espelho EXATO de caminhoTriangulo() em
+    src/app/(app)/catalogos/core/formaArredondada.ts (frontend) — editor,
+    visualização e PDF desenham a mesma curva. Se mudar lá, mude aqui."""
+    v = [(w / 2, 0.0), (w, h), (0.0, h)]
+    if not raio or raio <= 0:
+        return [("M", [v[0][0], v[0][1]]), ("L", [v[1][0], v[1][1]]), ("L", [v[2][0], v[2][1]]), ("Z", [])]
+
+    cantos = []
+    for i, c in enumerate(v):
+        ant = v[(i + 2) % 3]
+        prox = v[(i + 1) % 3]
+        la = math.hypot(ant[0] - c[0], ant[1] - c[1])
+        lp = math.hypot(prox[0] - c[0], prox[1] - c[1])
+        u1 = ((ant[0] - c[0]) / la, (ant[1] - c[1]) / la) if la > 0 else (0.0, 0.0)
+        u2 = ((prox[0] - c[0]) / lp, (prox[1] - c[1]) / lp) if lp > 0 else (0.0, 0.0)
+        cos = max(-1.0, min(1.0, u1[0] * u2[0] + u1[1] * u2[1]))
+        meio = math.acos(cos) / 2  # metade do ângulo interno do vértice
+        d = min(raio / math.tan(meio) if meio > 1e-6 else 0.0, la / 2, lp / 2)
+        cantos.append((c, (c[0] + u1[0] * d, c[1] + u1[1] * d), (c[0] + u2[0] * d, c[1] + u2[1] * d)))
+
+    cmds: list[tuple[str, list[float]]] = [("M", [cantos[0][1][0], cantos[0][1][1]])]
+    for i, (c, a, b) in enumerate(cantos):
+        if i > 0:
+            cmds.append(("L", [a[0], a[1]]))
+        cmds.append(("Q", [c[0], c[1], b[0], b[1]]))
+    cmds.append(("Z", []))
+    return cmds
+
+
 def draw_shape(c: "canvas.Canvas", spec: PdfShapeSpec, pagina_altura_px: float) -> None:
     c.setFillColor(HexColor(spec.color))
     c.setFillAlpha(spec.opacity)
 
     if spec.shapeType == "retangulo":
         x, y, w, h = box_to_pdf_rect(spec.x, spec.y, spec.w, spec.h, pagina_altura_px)
-        c.rect(x, y, w, h, fill=1, stroke=0)
+        # Raio limitado à metade do menor lado (como no preview).
+        raio = max(0.0, min(spec.raio, spec.w / 2, spec.h / 2))
+        if raio > 0:
+            c.roundRect(x, y, w, h, px_to_pt(raio), fill=1, stroke=0)
+        else:
+            c.rect(x, y, w, h, fill=1, stroke=0)
     elif spec.shapeType == "elipse":
         x, y, w, h = box_to_pdf_rect(spec.x, spec.y, spec.w, spec.h, pagina_altura_px)
         c.ellipse(x, y, x + w, y + h, fill=1, stroke=0)
     else:  # triangulo — mesmos vértices do sceneFunc do Konva
-        # (moveTo(w/2,0) lineTo(w,h) lineTo(0,h)): topo-centro,
-        # base-direita, base-esquerda, em espaço da app.
-        p1 = px_point_to_pdf(spec.x + spec.w / 2, spec.y, pagina_altura_px)
-        p2 = px_point_to_pdf(spec.x + spec.w, spec.y + spec.h, pagina_altura_px)
-        p3 = px_point_to_pdf(spec.x, spec.y + spec.h, pagina_altura_px)
+        # (topo-centro, base-direita, base-esquerda), em espaço da app; com
+        # raio > 0 os cantos são curvas (quadráticas -> cúbicas no PDF).
         path = c.beginPath()
-        path.moveTo(*p1)
-        path.lineTo(*p2)
-        path.lineTo(*p3)
-        path.close()
+        atual: tuple[float, float] = (0.0, 0.0)  # em px, espaço da app
+        for cmd, pts in caminho_triangulo(spec.w, spec.h, spec.raio):
+            if cmd == "M":
+                atual = (spec.x + pts[0], spec.y + pts[1])
+                path.moveTo(*px_point_to_pdf(atual[0], atual[1], pagina_altura_px))
+            elif cmd == "L":
+                atual = (spec.x + pts[0], spec.y + pts[1])
+                path.lineTo(*px_point_to_pdf(atual[0], atual[1], pagina_altura_px))
+            elif cmd == "Q":
+                q = (spec.x + pts[0], spec.y + pts[1])
+                fim = (spec.x + pts[2], spec.y + pts[3])
+                c1 = (atual[0] + 2 / 3 * (q[0] - atual[0]), atual[1] + 2 / 3 * (q[1] - atual[1]))
+                c2 = (fim[0] + 2 / 3 * (q[0] - fim[0]), fim[1] + 2 / 3 * (q[1] - fim[1]))
+                path.curveTo(
+                    *px_point_to_pdf(c1[0], c1[1], pagina_altura_px),
+                    *px_point_to_pdf(c2[0], c2[1], pagina_altura_px),
+                    *px_point_to_pdf(fim[0], fim[1], pagina_altura_px),
+                )
+                atual = fim
+            else:
+                path.close()
         c.drawPath(path, fill=1, stroke=0)
 
 
