@@ -46,6 +46,11 @@ class PdfTextSpec(BaseModel):
     # "destacado" = preço no estilo etiqueta (valor inteiro grande, R$ e centavos
     # pequenos no alto). Ausente = texto comum.
     precoEstilo: Optional[str] = None
+    # Contorno das letras (px de página). Espessura 0 = sem contorno. O traço
+    # sai ATRÁS do preenchimento, então `contornoEspessura` é o que aparece por fora.
+    contornoCor: Optional[str] = None
+    contornoOpacidade: float = 1.0
+    contornoEspessura: float = 0.0
 
 
 # Discriminador explícito por "kind" — mais robusto que deixar o
@@ -66,6 +71,12 @@ class PdfShapeSpec(BaseModel):
     # Raio dos cantos arredondados (retângulo/triângulo), em px de página.
     # 0 = cantos retos (payloads antigos não mandam o campo).
     raio: float = 0
+    # Contorno da forma (px de página), centrado na borda. Espessura 0 = sem
+    # contorno (payloads antigos não mandam os campos).
+    contornoCor: Optional[str] = None
+    contornoOpacidade: float = 1.0
+    contornoEspessura: float = 0.0
+    contornoEstilo: Literal["solido", "tracejado", "pontilhado"] = "solido"
 
 
 # Contorno ARREDONDADO de um card (retângulo só com traço, sem preenchimento) —

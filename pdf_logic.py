@@ -16,6 +16,7 @@ import math
 import re
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
+from typing import Optional
 
 import numpy as np
 from PIL import Image
@@ -244,8 +245,38 @@ def wrap_text_to_lines(
     return (lines if lines else [text]), overflow
 
 
-def _draw_line(c: "canvas.Canvas", text: str, x_px: float, baseline_y_px: float, pagina_altura_px: float) -> None:
+def _contorno_do_texto(spec: PdfTextSpec) -> Optional[tuple[str, float, float]]:
+    """(cor, opacidade, espessura em px) do contorno das letras, ou None."""
+    if spec.contornoEspessura > 0 and spec.contornoCor:
+        return (spec.contornoCor, spec.contornoOpacidade, spec.contornoEspessura)
+    return None
+
+
+def _draw_line(
+    c: "canvas.Canvas",
+    text: str,
+    x_px: float,
+    baseline_y_px: float,
+    pagina_altura_px: float,
+    contorno: Optional[tuple[str, float, float]] = None,
+) -> None:
     x_pt, y_pt = px_point_to_pdf(x_px, baseline_y_px, pagina_altura_px)
+    if contorno is not None:
+        # Contorno ATRÁS: primeiro só o traço (modo de texto 1) com o dobro da
+        # espessura — a metade de dentro fica coberta pelo preenchimento logo
+        # abaixo —, depois o texto normal por cima. save/restoreState isola o modo
+        # de texto e as cores de traço do resto.
+        cor, opacidade, espessura = contorno
+        c.saveState()
+        c.setStrokeColor(HexColor(cor))
+        c.setStrokeAlpha(opacidade)
+        c.setLineWidth(px_to_pt(espessura * 2))
+        c.setLineJoin(1)
+        t = c.beginText(x_pt, y_pt)
+        t.setTextRenderMode(1)
+        t.textOut(text)
+        c.drawText(t)
+        c.restoreState()
     c.drawString(x_pt, y_pt, text)
 
 
@@ -364,12 +395,13 @@ def _draw_preco_destacado(c: "canvas.Canvas", spec: PdfTextSpec, pagina_altura_p
     def ascent(tam: float) -> float:
         return _tight_ascent_descent(font_name, tam)[0]
 
+    contorno = _contorno_do_texto(spec)
     ops = layout_preco_destacado(partes, spec.fontSizeMax, spec.minSize, spec.maxW, spec.x, spec.y, spec.align, medir, ascent)
     c.setFillColor(HexColor(spec.color))
     c.setFillAlpha(1.0)
     for texto, tam, x, baseline in ops:
         c.setFont(font_name, px_to_pt(tam))
-        _draw_line(c, texto, x, baseline, pagina_altura_px)
+        _draw_line(c, texto, x, baseline, pagina_altura_px, contorno)
     return True
 
 
@@ -381,6 +413,7 @@ def draw_text_fit(c: "canvas.Canvas", spec: PdfTextSpec, pagina_altura_px: float
     if spec.precoEstilo == "destacado" and _draw_preco_destacado(c, spec, pagina_altura_px, font_name):
         return
 
+    contorno = _contorno_do_texto(spec)
     floor = min(spec.minSize, spec.fontSizeMax)
     lines = [spec.text]
     used_size = floor
@@ -413,9 +446,9 @@ def draw_text_fit(c: "canvas.Canvas", spec: PdfTextSpec, pagina_altura_px: float
         baseline_y_px = spec.y + i * line_h + ascent
 
         if spec.align == "center":
-            _draw_line(c, line, spec.x + (spec.maxW - line_w) / 2, baseline_y_px, pagina_altura_px)
+            _draw_line(c, line, spec.x + (spec.maxW - line_w) / 2, baseline_y_px, pagina_altura_px, contorno)
         elif spec.align == "right":
-            _draw_line(c, line, spec.x + (spec.maxW - line_w), baseline_y_px, pagina_altura_px)
+            _draw_line(c, line, spec.x + (spec.maxW - line_w), baseline_y_px, pagina_altura_px, contorno)
         elif spec.align == "justify" and i < len(lines) - 1 and " " in line.strip():
             words = line.split(" ")
             words_w = sum(pdfmetrics.stringWidth(w, font_name, used_size) for w in words)
@@ -424,10 +457,10 @@ def draw_text_fit(c: "canvas.Canvas", spec: PdfTextSpec, pagina_altura_px: float
             extra_space = max(0.0, spec.maxW - words_w) / gap_count
             cursor_x = spec.x
             for w in words:
-                _draw_line(c, w, cursor_x, baseline_y_px, pagina_altura_px)
+                _draw_line(c, w, cursor_x, baseline_y_px, pagina_altura_px, contorno)
                 cursor_x += pdfmetrics.stringWidth(w, font_name, used_size) + space_w + extra_space
         else:
-            _draw_line(c, line, spec.x, baseline_y_px, pagina_altura_px)
+            _draw_line(c, line, spec.x, baseline_y_px, pagina_altura_px, contorno)
 
 
 # --- Formas / bordas / imagens (geometria trivial, já resolvida pelo payload) ---
@@ -467,18 +500,37 @@ def caminho_triangulo(w: float, h: float, raio: float) -> list[tuple[str, list[f
 def draw_shape(c: "canvas.Canvas", spec: PdfShapeSpec, pagina_altura_px: float) -> None:
     c.setFillColor(HexColor(spec.color))
     c.setFillAlpha(spec.opacity)
+    _tracar_forma(c, spec, pagina_altura_px, fill=1, stroke=0)
 
+    # Contorno: segunda passada, só o traço, centrado na borda (como no Konva).
+    if spec.contornoEspessura > 0 and spec.contornoCor:
+        largura = px_to_pt(spec.contornoEspessura)
+        c.saveState()
+        c.setStrokeColor(HexColor(spec.contornoCor))
+        c.setStrokeAlpha(spec.contornoOpacidade)
+        c.setLineWidth(largura)
+        c.setLineJoin(1)
+        if spec.contornoEstilo == "tracejado":
+            c.setDash([largura * 3, largura * 2])
+        elif spec.contornoEstilo == "pontilhado":
+            c.setLineCap(1)
+            c.setDash([0.001, largura * 2])
+        _tracar_forma(c, spec, pagina_altura_px, fill=0, stroke=1)
+        c.restoreState()
+
+
+def _tracar_forma(c: "canvas.Canvas", spec: PdfShapeSpec, pagina_altura_px: float, fill: int, stroke: int) -> None:
     if spec.shapeType == "retangulo":
         x, y, w, h = box_to_pdf_rect(spec.x, spec.y, spec.w, spec.h, pagina_altura_px)
         # Raio limitado à metade do menor lado (como no preview).
         raio = max(0.0, min(spec.raio, spec.w / 2, spec.h / 2))
         if raio > 0:
-            c.roundRect(x, y, w, h, px_to_pt(raio), fill=1, stroke=0)
+            c.roundRect(x, y, w, h, px_to_pt(raio), fill=fill, stroke=stroke)
         else:
-            c.rect(x, y, w, h, fill=1, stroke=0)
+            c.rect(x, y, w, h, fill=fill, stroke=stroke)
     elif spec.shapeType == "elipse":
         x, y, w, h = box_to_pdf_rect(spec.x, spec.y, spec.w, spec.h, pagina_altura_px)
-        c.ellipse(x, y, x + w, y + h, fill=1, stroke=0)
+        c.ellipse(x, y, x + w, y + h, fill=fill, stroke=stroke)
     else:  # triangulo — mesmos vértices do sceneFunc do Konva
         # (topo-centro, base-direita, base-esquerda), em espaço da app; com
         # raio > 0 os cantos são curvas (quadráticas -> cúbicas no PDF).
@@ -504,7 +556,7 @@ def draw_shape(c: "canvas.Canvas", spec: PdfShapeSpec, pagina_altura_px: float) 
                 atual = fim
             else:
                 path.close()
-        c.drawPath(path, fill=1, stroke=0)
+        c.drawPath(path, fill=fill, stroke=stroke)
 
 
 def draw_border(c: "canvas.Canvas", spec: PdfBorderSpec, pagina_altura_px: float) -> None:
